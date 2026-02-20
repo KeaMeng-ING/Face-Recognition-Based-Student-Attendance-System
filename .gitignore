@@ -1,0 +1,86 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# PyTorch
+*.pth
+*.pt
+*.ckpt
+
+# Checkpoints and Models
+checkpoints/
+*.pth.tar
+models/
+saved_models/
+
+# Dataset (LFW is large, don't commit it)
+lfw/
+lfw-deepfunneled/
+*.zip
+*.tar.gz
+*.tar
+
+# Logs and Results
+*.log
+logs/
+runs/
+results/
+output/
+
+# Training artifacts
+*.png
+*.jpg
+*.jpeg
+training_curves.png
+embeddings/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# InsightFace models cache
+~/.insightface/
+.insightface/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Performance profiling
+*.prof

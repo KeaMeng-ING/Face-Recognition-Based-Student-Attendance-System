@@ -1,0 +1,29 @@
+# Core Dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Data Processing
+numpy>=1.24.0
+pillow>=9.5.0
+opencv-python>=4.7.0
+scikit-learn>=1.2.0
+
+# Training and Visualization
+tqdm>=4.65.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional: For pretrained model conversion
+onnx>=1.14.0
+onnxruntime>=1.15.0
+onnx2pytorch>=0.4.1
+
+# Optional: For t-SNE visualization
+umap-learn>=0.5.3
+
+# Optional: For deployment
+streamlit>=1.25.0
+redis>=4.5.0
+
+# Optional: For InsightFace integration
+insightface>=0.7.3
