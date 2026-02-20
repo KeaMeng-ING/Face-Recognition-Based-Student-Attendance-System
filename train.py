@@ -52,7 +52,7 @@ class LFWDataset(Dataset):
 # Prepare LFW Dataset
 # ============================================================================
 
-def prepare_lfw_data(lfw_root="./lfw", min_images=10, train_ratio=0.7, val_ratio=0.15):
+def prepare_lfw_data(lfw_root="/kaggle/input/lfw-dataset/lfw-deepfunneled/lfw-deepfunneled", min_images=10, train_ratio=0.7, val_ratio=0.15):
     """
     Filter and split LFW dataset
     
@@ -227,7 +227,7 @@ def validate(model, criterion, val_loader, device):
 def main():
     # Configuration
     config = {
-        'lfw_root': './lfw',
+        'lfw_root': '/kaggle/input/lfw-dataset/lfw-deepfunneled/lfw-deepfunneled',
         'batch_size': 64,
         'num_epochs': 30,
         'learning_rate': 0.1,

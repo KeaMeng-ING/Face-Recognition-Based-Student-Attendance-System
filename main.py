@@ -4,7 +4,7 @@ from face_processor import align_face
 from dataset import LFWSubset, transform
 from torch.utils.data import DataLoader
 
-lfw_path = "./lfw"
+lfw_path = "/kaggle/input/lfw-dataset/lfw-deepfunneled/lfw-deepfunneled"
 min_images = 10  # only keep people with 10+ photos
 
 valid_people = []
