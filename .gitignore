@@ -1,0 +1,64 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# ML/Data files (large files)
+*.pth
+*.pt
+*.pkl
+*.hdf5
+*.h5
+*.npy
+*.npz
+
+# Dataset directories
+processed_dataset/
+processed_dataset/*
+vggface2_train/
+
+# Output and logs
+logs/
+runs/
+*.log
+.wandb/
+
+# Temporary files
+tmp/
+temp/
+.cache/
+*.tmp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Local configuration
+*.local
+config.local.py
