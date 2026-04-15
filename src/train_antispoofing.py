@@ -35,7 +35,7 @@ from PIL import Image
 # ── Config ────────────────────────────────────────────────────────────────────
 CSV_PATH     = "./processed_dataset/data.csv"
 SAVE_DIR     = "./checkpoints"
-IMG_SIZE     = 80
+IMG_SIZE     = 224
 BATCH_SIZE   = 32
 NUM_EPOCHS   = 40
 LR           = 1e-4
@@ -48,7 +48,7 @@ FOCAL_GAMMA  = 2.0
 # Hand-picked val subjects: choose subjects that have BOTH real+fake,
 # spread across the subject ID range for diversity.
 # Remaining subjects go to train.
-VAL_SUBJECTS = {"0003", "0008", "0015"}   # 3 subjects = ~19% of 16
+VAL_SUBJECTS = {"0001", "0003", "0008", "0015"}  # 25% instead of 19%
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -99,6 +99,13 @@ def cross_subject_split(df, val_subjects):
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
+def load_fft(path):
+    """Load FFT with normalization to improve training stability."""
+    arr = np.load(path).astype(np.float32)
+    arr = (arr - arr.mean()) / (arr.std() + 1e-8)
+    return torch.from_numpy(arr).unsqueeze(0)
+
+
 class NUAADataset(Dataset):
     TRAIN_TRANSFORMS = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -129,9 +136,7 @@ class NUAADataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         rgb = self.transform(Image.open(row["rgb_path"]).convert("RGB"))
-        fft = torch.from_numpy(
-            np.load(row["fft_path"]).astype(np.float32)
-        ).unsqueeze(0)
+        fft = load_fft(row["fft_path"])
         label = torch.tensor(float(row["label"]), dtype=torch.float32)
         return rgb, fft, label
 
@@ -167,11 +172,12 @@ class FFTBranch(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.Conv2d(1, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.MaxPool2d(2),
             nn.AdaptiveAvgPool2d((3, 3)),
         )
 
@@ -186,7 +192,7 @@ class AntiSpoofNet(nn.Module):
 
         # Freeze early layers — only fine-tune last 5 blocks
         for i, layer in enumerate(base.features):
-            if i < 14:
+            if i < 10:  # Freeze only first 10 instead of 14
                 for p in layer.parameters():
                     p.requires_grad = False
 

@@ -64,11 +64,12 @@ class FFTBranch(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.Conv2d(1, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.MaxPool2d(2),
             nn.AdaptiveAvgPool2d((3, 3)),
         )
     def forward(self, x): return self.net(x).flatten(1)
@@ -82,7 +83,7 @@ class AntiSpoofNet(nn.Module):
         self.rgb_pool   = nn.AdaptiveAvgPool2d(1)
         self.fft_branch = FFTBranch()
         self.classifier = nn.Sequential(
-            nn.Linear(1280 + 1152, 512), nn.BatchNorm1d(512), nn.ReLU(),
+            nn.Linear(1280 + 2304, 512), nn.BatchNorm1d(512), nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(512, 128), nn.ReLU(),
             nn.Dropout(0.3),
@@ -155,13 +156,48 @@ class PersonalDataset(Dataset):
 
 
 def load_records(data_dir):
+    """
+    Supports both old single-person and new multi-person folder structures:
+
+    Old (single person):
+        my_spoof_data/real/*.jpg
+        my_spoof_data/fake/*.jpg
+
+    New (multi-person):
+        my_spoof_data/real/person_alice/*.jpg
+        my_spoof_data/real/person_bob/*.jpg
+        my_spoof_data/fake/shared/*.jpg
+
+    Both are loaded transparently — just recurse from real/ and fake/.
+    """
     records = []
     for label, subdir in [(1, "real"), (0, "fake")]:
         d = os.path.join(data_dir, subdir)
         if not os.path.exists(d):
             continue
-        for f in Path(d).rglob("*.jpg"):
+        files = list(Path(d).rglob("*.jpg"))
+        for f in files:
             records.append((str(f), label))
+
+    # Print breakdown by person/folder so you can see the distribution
+    from collections import defaultdict
+    real_by_folder = defaultdict(int)
+    fake_by_folder = defaultdict(int)
+    for path, label in records:
+        p     = Path(path)
+        folder = p.parent.name   # person_alice, shared, etc.
+        if label == 1:
+            real_by_folder[folder] += 1
+        else:
+            fake_by_folder[folder] += 1
+
+    print("  Real samples by person/folder:")
+    for folder, n in sorted(real_by_folder.items()):
+        print(f"    {folder:<25}  {n}")
+    print("  Fake samples by folder:")
+    for folder, n in sorted(fake_by_folder.items()):
+        print(f"    {folder:<25}  {n}")
+
     return records
 
 
@@ -355,7 +391,7 @@ def main():
         "finetuned":   True,
     }, SAVE_PATH)
     print(f"✅ Saved to {SAVE_PATH}  (threshold={best_t:.4f})")
-    print("\nRestart attendance.py — it will automatically use the updated model.")
+    print("\nRestart app.py — it will automatically use the updated model.")
 
 
 if __name__ == "__main__":

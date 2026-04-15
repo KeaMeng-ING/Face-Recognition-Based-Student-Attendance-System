@@ -42,6 +42,10 @@ build/
 processed_dataset/
 processed_dataset/*
 vggface2_train/
+NUAA/
+NUAA/*
+my_spoof_data/
+
 
 # Output and logs
 logs/

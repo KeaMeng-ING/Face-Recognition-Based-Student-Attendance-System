@@ -64,11 +64,12 @@ class FFTBranch(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(1, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.Conv2d(1, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
             nn.MaxPool2d(2),
             nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+            nn.MaxPool2d(2),
             nn.AdaptiveAvgPool2d((3, 3)),
         )
     def forward(self, x):
@@ -83,7 +84,7 @@ class AntiSpoofNet(nn.Module):
         self.rgb_pool   = nn.AdaptiveAvgPool2d(1)
         self.fft_branch = FFTBranch()
         self.classifier = nn.Sequential(
-            nn.Linear(1280 + 1152, 512), nn.BatchNorm1d(512), nn.ReLU(),
+            nn.Linear(1280 + 2304, 512), nn.BatchNorm1d(512), nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(512, 128), nn.ReLU(),
             nn.Dropout(0.3),
