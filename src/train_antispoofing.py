@@ -33,7 +33,7 @@ from PIL import Image
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-CSV_PATH     = "./processed_dataset/data.csv"
+CSV_PATH     = "./dataset/processed_dataset/data.csv"
 SAVE_DIR     = "./checkpoints"
 IMG_SIZE     = 224
 BATCH_SIZE   = 32
@@ -41,7 +41,8 @@ NUM_EPOCHS   = 40
 LR           = 1e-4
 WEIGHT_DECAY = 1e-5
 SEED         = 42
-DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE       = "mps" if torch.backends.mps.is_available() else \
+               "cuda" if torch.cuda.is_available() else "cpu"
 FOCAL_ALPHA  = 0.25
 FOCAL_GAMMA  = 2.0
 
@@ -63,36 +64,68 @@ def set_seed(seed):
 # ── Split ─────────────────────────────────────────────────────────────────────
 
 def extract_subject_id(filepath):
+    """
+    Extract 4-digit NUAA subject ID from filename (e.g. printed_photo_0001_xxx → '0001').
+    For non-NUAA files (screen attacks), returns the attack_type prefix as the group ID
+    so they get their own consistent split bucket.
+    """
     stem = Path(filepath).stem
-    m = re.match(r"(\d{4})", stem)
-    return m.group(1) if m else Path(filepath).parent.name
+    # Search anywhere in the stem for a 4-digit subject ID
+    m = re.search(r"(?<!\d)(\d{4})(?!\d)", stem)
+    if m:
+        return m.group(1)
+    # No subject ID — use attack type prefix (everything before last _NNNNN)
+    parts = stem.rsplit("_", 1)
+    return parts[0] if len(parts) == 2 else stem
 
 
 def cross_subject_split(df, val_subjects):
     """
-    Assign ALL images (real + fake) of a subject to the same partition.
-    This eliminates identity leakage entirely.
+    For NUAA data: assign all images of a subject to the same partition
+    (identity-leakage-free cross-subject split).
+
+    For non-NUAA data (screen attacks): random 80/20 split per attack type
+    so each attack type is represented in both train and val.
     """
     df = df.copy()
     df["subject_id"] = df["rgb_path"].apply(extract_subject_id)
 
-    val_df   = df[df["subject_id"].isin(val_subjects)].reset_index(drop=True)
-    train_df = df[~df["subject_id"].isin(val_subjects)].reset_index(drop=True)
+    # NUAA rows have 4-digit subject IDs like '0001'
+    nuaa_mask    = df["subject_id"].str.match(r"^\d{4}$")
+    nuaa_df      = df[nuaa_mask]
+    non_nuaa_df  = df[~nuaa_mask]
 
-    print(f"\n  Cross-subject split (identity-leakage-free):")
-    print(f"    Train subjects : {sorted(train_df['subject_id'].unique())}")
-    print(f"    Val subjects   : {sorted(val_df['subject_id'].unique())}")
+    # NUAA: cross-subject split
+    nuaa_val   = nuaa_df[nuaa_df["subject_id"].isin(val_subjects)]
+    nuaa_train = nuaa_df[~nuaa_df["subject_id"].isin(val_subjects)]
+
+    # Non-NUAA: random 20% val per attack type
+    non_nuaa_train_parts, non_nuaa_val_parts = [], []
+    for attack_type, group in non_nuaa_df.groupby("subject_id"):
+        group = group.sample(frac=1, random_state=SEED)
+        split = max(1, int(len(group) * 0.2))
+        non_nuaa_val_parts.append(group.iloc[:split])
+        non_nuaa_train_parts.append(group.iloc[split:])
+
+    non_nuaa_val   = pd.concat(non_nuaa_val_parts)   if non_nuaa_val_parts   else pd.DataFrame()
+    non_nuaa_train = pd.concat(non_nuaa_train_parts) if non_nuaa_train_parts else pd.DataFrame()
+
+    train_df = pd.concat([nuaa_train, non_nuaa_train]).reset_index(drop=True)
+    val_df   = pd.concat([nuaa_val,   non_nuaa_val  ]).reset_index(drop=True)
+
+    print(f"\n  Split summary:")
+    print(f"    NUAA train subjects : {sorted(nuaa_train['subject_id'].unique())}")
+    print(f"    NUAA val subjects   : {sorted(nuaa_val['subject_id'].unique())}")
+    if len(non_nuaa_df) > 0:
+        print(f"    Screen attack types (80/20 random split):")
+        for at, g in non_nuaa_df.groupby("subject_id"):
+            in_val = len(non_nuaa_val[non_nuaa_val["subject_id"] == at])
+            print(f"      {at:<30} train={len(g)-in_val}  val={in_val}")
 
     for name, part in [("Train", train_df), ("Val", val_df)]:
         r = (part["label"] == 1).sum()
         f = (part["label"] == 0).sum()
         print(f"    {name}: {len(part)} samples  (real={r}, fake={f})")
-
-    # Verify no subject overlap
-    train_subs = set(train_df["subject_id"].unique())
-    val_subs   = set(val_df["subject_id"].unique())
-    assert len(train_subs & val_subs) == 0, "Subject overlap detected!"
-    print(f"    Identity leakage: NONE ✓")
 
     return train_df, val_df
 
@@ -143,9 +176,16 @@ class NUAADataset(Dataset):
 
 def make_loaders(csv_path, val_subjects, batch_size, seed):
     df = pd.read_csv(csv_path)
+    # attack_type column added in updated nuaa_preprocess.py — keep it if present
     df = df[df["rgb_path"].apply(os.path.exists) &
             df["fft_path"].apply(os.path.exists)].reset_index(drop=True)
     print(f"  Total valid samples: {len(df)}")
+
+    if "attack_type" in df.columns:
+        print("  Attack type breakdown:")
+        for attack, count in df["attack_type"].value_counts().items():
+            label = "real" if df[df["attack_type"] == attack]["label"].iloc[0] == 1 else "fake"
+            print(f"    {attack:<22}  {count:>5}  ({label})")
 
     train_df, val_df = cross_subject_split(df, val_subjects)
 
@@ -159,10 +199,11 @@ def make_loaders(csv_path, val_subjects, batch_size, seed):
     train_ds = NUAADataset(train_df, mode="train")
     val_ds   = NUAADataset(val_df,   mode="val")
 
+    pin = DEVICE == "cuda"
     train_loader = DataLoader(train_ds, batch_size=batch_size,
-                              sampler=sampler, num_workers=4, pin_memory=True)
+                              sampler=sampler, num_workers=4, pin_memory=pin)
     val_loader   = DataLoader(val_ds, batch_size=batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
+                              shuffle=False, num_workers=4, pin_memory=pin)
     return train_loader, val_loader
 
 
@@ -178,7 +219,9 @@ class FFTBranch(nn.Module):
             nn.MaxPool2d(2),
             nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d((3, 3)),
+            # AvgPool2d(3,3) on 10x10 input → 3x3 output (same as AdaptiveAvgPool2d((3,3)))
+            # AdaptiveAvgPool2d is not supported on MPS when sizes aren't divisible
+            nn.AvgPool2d(kernel_size=3, stride=3),
         )
 
     def forward(self, x):
@@ -200,7 +243,7 @@ class AntiSpoofNet(nn.Module):
         self.rgb_pool   = nn.AdaptiveAvgPool2d(1)
         self.fft_branch = FFTBranch()
         self.classifier = nn.Sequential(
-            nn.Linear(1280 + 1152, 512),
+            nn.Linear(1280 + 2304, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(dropout),
