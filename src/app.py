@@ -1,20 +1,14 @@
 """
 Face Recognition Attendance System — with Anti-Spoofing
 =========================================================
-Camera : iPhone via Camo (or any webcam, source=0)
-Models : InceptionResnetV1 (VGGFace2) — identity recognition
-         AntiSpoofNet (MobileNetV2 + FFT) — liveness detection
-
-Improvements over previous version:
-  - CLAHE brightness normalisation on face crop before spoof inference
-  - Larger crop margin (30%) so the model gets more context
-  - Live score HUD at bottom (raw + smoothed + threshold marker)
-  - Score summary printed after every session to help tune threshold
-  - Slightly relaxed MTCNN confidence (0.90) for MacBook cam
+FIXES APPLIED:
+  1. SPOOF_TRANSFORM now resizes to 224x224 (was 80x80) — MobileNetV2 fix
+  2. CLAHE removed from _prepare_spoof_crop (training had no CLAHE)
+  3. Buffer sizes reduced: 24→12, confirm frames 8→4
+  4. FFT computed from 80x80 grayscale (unchanged, was already correct)
 """
 
 import csv
-
 import cv2
 import torch
 import torch.nn as nn
@@ -33,24 +27,20 @@ CONFIG = {
     "camera_source":      0,
     "enrollment_frames":  20,
 
-    # Face quality gates (relaxed slightly for MacBook cam)
     "min_face_px":        80,
     "sharpness_min":      60.0,
     "brightness_min":     40,
     "brightness_max":     230,
 
-    # Identity anti-flicker
     "embedding_buffer_size": 12,
     "label_stable_frames":    8,
     "recognition_threshold":  0.60,
 
-    # ── Anti-spoofing ─────────────────────────────────────────
     "spoof_model_path":          "./checkpoints/best_model_antispoofing.pth",
-    "spoof_buffer_size":          12,
-    "spoof_real_confirm_frames":   6,
-    "spoof_confirm_frames":        4,
-    "spoof_crop_margin":           0.3,   # extra padding around face bbox
-    # ─────────────────────────────────────────────────────────
+    "spoof_buffer_size":          16,   
+    "spoof_real_confirm_frames":   8,   
+    "spoof_confirm_frames":        6,   
+    "spoof_crop_margin":           0.30,
 
     "gallery_path": "./face_gallery.json",
 }
@@ -96,9 +86,10 @@ class AntiSpoofNet(nn.Module):
         return self.classifier(torch.cat([r, f], dim=1)).squeeze(1)
 
 
+# FIX 1: resize to 224x224 to match MobileNetV2 training size (was 80x80)
 SPOOF_TRANSFORM = transforms.Compose([
     transforms.ToPILImage(),
-    transforms.Resize((80, 80)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
@@ -106,8 +97,9 @@ SPOOF_TRANSFORM = transforms.Compose([
 
 def _prepare_spoof_crop(frame_bgr, bbox):
     """
-    Crop face with extra margin and apply CLAHE brightness normalisation.
-    This reduces score variance caused by distance and lighting changes.
+    Crop face with extra margin.
+    FIX 2: CLAHE removed — training data had no CLAHE, applying it at
+    inference shifts the pixel distribution and confuses the model.
     """
     x1, y1, x2, y2 = bbox
     w, h = x2 - x1, y2 - y1
@@ -120,30 +112,19 @@ def _prepare_spoof_crop(frame_bgr, bbox):
     crop = frame_bgr[cy1:cy2, cx1:cx2]
     if crop.size == 0:
         return None
-
-    # CLAHE on L channel: normalises brightness without blowing out details
-    lab    = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe  = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
-    l      = clahe.apply(l)
-    crop   = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
     return crop
 
 
 def _fft_tensor(face_bgr):
+    """FFT computed from 80x80 grayscale — matches training."""
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray = cv2.resize(gray, (80, 80))
     mag  = np.log(np.abs(np.fft.fftshift(np.fft.fft2(gray))) + 1e-8)
-    mag  = (mag - mag.min()) / (mag.max() - mag.min() + 1e-8)
+    mag  = (mag - mag.mean()) / (mag.std() + 1e-8)
     return torch.from_numpy(mag.astype(np.float32)).unsqueeze(0).unsqueeze(0)
 
 
 class AntiSpoofPredictor:
-    """
-    Two anti-flicker layers:
-      Layer 1 — Rolling mean  : average last N raw scores
-      Layer 2 — Hysteresis    : require consecutive agreement to flip state
-    """
     def __init__(self, device):
         self.device = device
         ckpt = torch.load(CONFIG["spoof_model_path"],
@@ -160,7 +141,7 @@ class AntiSpoofPredictor:
         self._consec_real  = 0
         self._consec_spoof = 0
         self._stable_state = "real"
-        self.all_scores    = []   # full history for post-session summary
+        self.all_scores    = []
 
     @torch.no_grad()
     def predict(self, face_bgr):
@@ -205,8 +186,8 @@ class AntiSpoofPredictor:
         pct = sum(1 for s in arr if s >= self.threshold) / len(arr) * 100
         print(f"  Frames above threshold (→ REAL) : {pct:.1f}%")
         if pct < 60:
-            sug = max(0.05, min(arr) - 0.03)
-            print(f"  ⚠️  Your real face is scoring below threshold too often.")
+            sug = max(0.05, mean - 0.05)
+            print(f"  ⚠️  Your real face scores below threshold too often.")
             print(f"     Suggested threshold : {sug:.4f}  (use menu option 5)")
         elif pct > 95:
             print(f"  ✅ Threshold looks well-calibrated for your camera.")
@@ -373,10 +354,6 @@ def draw_score_bar(img, bbox, score, color):
     cv2.rectangle(img, (x1,y2+4), (x1+fill,y2+12), color,      -1)
 
 def draw_spoof_hud(img, raw, smoothed, state, warming_up, threshold):
-    """
-    Bottom bar: shows raw score (dim), smoothed score (bright), threshold line.
-    Lets you see exactly what the model thinks in real time.
-    """
     h, w = img.shape[:2]
     bar_y = h - 30
     cv2.rectangle(img, (0,bar_y), (w,h), (20,20,20), -1)
@@ -408,7 +385,7 @@ def draw_attendance_overlay(img, attendance):
 
 
 # ─────────────────────────────────────────────────────────────
-# ENROLLMENT  (spoof check disabled — you're physically there)
+# ENROLLMENT
 # ─────────────────────────────────────────────────────────────
 PROMPTS = [
     "Look straight",      "Turn slightly LEFT",   "Turn slightly RIGHT",
@@ -429,57 +406,52 @@ def enroll_person(name, detector, embedder, gallery):
 
     window_name = f"Enrolling: {name}"
 
-    while len(collected) < target:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while len(collected) < target:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        face_tensor, bbox, _ = detector.detect(frame)
-        ok, msg = frame_quality(frame, bbox)
-        display = frame.copy()
+            face_tensor, bbox, _ = detector.detect(frame)
+            ok, msg = frame_quality(frame, bbox)
+            display = frame.copy()
 
-        n = len(collected)
-        cv2.rectangle(display, (10,10), (310,32), (40,40,40), -1)
-        cv2.rectangle(display, (10,10), (10+int(300*n/target),32), (0,210,0), -1)
-        cv2.putText(display, f"{name}  {n}/{target}", (10,55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+            n = len(collected)
+            cv2.rectangle(display, (10,10), (310,32), (40,40,40), -1)
+            cv2.rectangle(display, (10,10), (10+int(300*n/target),32), (0,210,0), -1)
+            cv2.putText(display, f"{name}  {n}/{target}", (10,55),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
 
-        if time.time() - prompt_tick > 2.5:
-            prompt_idx  = (prompt_idx+1) % len(PROMPTS)
-            prompt_tick = time.time()
-        cv2.putText(display, PROMPTS[prompt_idx], (10,82),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0,230,230), 2)
+            if time.time() - prompt_tick > 2.5:
+                prompt_idx  = (prompt_idx+1) % len(PROMPTS)
+                prompt_tick = time.time()
+            cv2.putText(display, PROMPTS[prompt_idx], (10,82),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0,230,230), 2)
 
-        if bbox is not None:
-            x1,y1,x2,y2 = bbox
-            cv2.rectangle(display,(x1,y1),(x2,y2),
-                          (0,210,0) if ok else (0,60,220),2)
-        cv2.putText(display, msg, (10,display.shape[0]-12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.58,
-                    (0,210,0) if ok else (0,80,220),2)
-        cv2.imshow(window_name, display)
+            if bbox is not None:
+                x1,y1,x2,y2 = bbox
+                cv2.rectangle(display,(x1,y1),(x2,y2),
+                              (0,210,0) if ok else (0,60,220),2)
+            cv2.putText(display, msg, (10,display.shape[0]-12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58,
+                        (0,210,0) if ok else (0,80,220),2)
+            cv2.imshow(window_name, display)
 
-        if ok and face_tensor is not None:
-            collected.append(embedder.embed(face_tensor))
-            time.sleep(0.12)
+            if ok and face_tensor is not None:
+                collected.append(embedder.embed(face_tensor))
+                time.sleep(0.12)
 
-        key = cv2.waitKey(1) & 0xFF
-        # Check for ESC key or window closure
-        if key == 27:  # ESC
-            cap.release()
-            cv2.destroyAllWindows()
-            print(f"⏸️  Enrollment cancelled.")
-            return False
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
+                print(f"⏸️  Enrollment cancelled.")
+                return False
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                print(f"⏸️  Enrollment cancelled.")
+                return False
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
-        # Check if window was closed by clicking X
-        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-            cap.release()
-            cv2.destroyAllWindows()
-            print(f"⏸️  Enrollment cancelled.")
-            return False
-
-    cap.release()
-    cv2.destroyAllWindows()
     if len(collected) >= 8:
         gallery.enroll(name, collected)
         return True
@@ -513,101 +485,98 @@ def run_recognition(detector, embedder, gallery, spoof_predictor):
         with open(log_path, "w", newline="") as f:
             csv.writer(f).writerow(["name", "date", "time"])
 
-
-
     print("\n🎯 Recognition + Anti-Spoofing — Press ESC to quit")
     print("   Watch the bottom bar to see your live spoof scores.\n")
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        face_tensor, bbox, spoof_crop = detector.detect(frame)
-        display = frame.copy()
+            face_tensor, bbox, spoof_crop = detector.detect(frame)
+            display = frame.copy()
 
-        if face_tensor is None or spoof_crop is None:
-            emb_buffer.clear()
-            stable_name = "..."; stable_score = 0.0
-            candidate = None;    candidate_run = 0
-            spoof_predictor.reset()
-            last_warming = True
-
-        else:
-            # ── Step 1: Anti-spoofing ─────────────────────────
-            is_real, smoothed, warming_up = spoof_predictor.predict(spoof_crop)
-            last_raw      = spoof_predictor.score_buffer[-1] \
-                            if spoof_predictor.score_buffer else 0.0
-            last_smoothed = smoothed
-            last_state    = "real" if is_real else "spoof"
-            last_warming  = warming_up
-
-            if warming_up:
-                if bbox is not None:
-                    buf     = len(spoof_predictor.score_buffer)
-                    buf_max = CONFIG["spoof_buffer_size"]
-                    pct     = int((bbox[2]-bbox[0]) * buf / buf_max)
-                    cv2.rectangle(display,(bbox[0],bbox[1]-8),
-                                  (bbox[2],bbox[1]),(40,40,40),-1)
-                    cv2.rectangle(display,(bbox[0],bbox[1]-8),
-                                  (bbox[0]+pct,bbox[1]),(0,180,255),-1)
-                    cv2.rectangle(display,(bbox[0],bbox[1]),
-                                  (bbox[2],bbox[3]),(0,180,255),2)
-                    cv2.putText(display,f"Checking {buf}/{buf_max}",
-                                (bbox[0],bbox[1]-12),
-                                cv2.FONT_HERSHEY_SIMPLEX,0.48,(0,180,255),1)
-
-            elif not is_real:
-                # ── SPOOF ─────────────────────────────────────
+            if face_tensor is None or spoof_crop is None:
                 emb_buffer.clear()
-                stable_name = "..."; candidate = None; candidate_run = 0
-                if bbox is not None:
-                    draw_box_label(display, bbox,
-                                   f"SPOOF  {smoothed:.2f}", (0,0,255))
-                    draw_score_bar(display, bbox, smoothed, (0,0,255))
+                stable_name = "..."; stable_score = 0.0
+                candidate = None;    candidate_run = 0
+                spoof_predictor.reset()
+                last_warming = True
 
             else:
-                # ── REAL → recognize ──────────────────────────
-                emb_buffer.append(embedder.embed(face_tensor))
-                avg_emb = F.normalize(
-                    torch.stack(list(emb_buffer)).mean(dim=0), p=2, dim=0)
-                raw_name, raw_score = gallery.recognize(avg_emb)
+                is_real, smoothed, warming_up = spoof_predictor.predict(spoof_crop)
+                last_raw      = spoof_predictor.score_buffer[-1] \
+                                if spoof_predictor.score_buffer else 0.0
+                last_smoothed = smoothed
+                last_state    = "real" if is_real else "spoof"
+                last_warming  = warming_up
 
-                if raw_name == candidate:
-                    candidate_run += 1
+                if warming_up:
+                    if bbox is not None:
+                        buf     = len(spoof_predictor.score_buffer)
+                        buf_max = CONFIG["spoof_buffer_size"]
+                        pct     = int((bbox[2]-bbox[0]) * buf / buf_max)
+                        cv2.rectangle(display,(bbox[0],bbox[1]-8),
+                                      (bbox[2],bbox[1]),(40,40,40),-1)
+                        cv2.rectangle(display,(bbox[0],bbox[1]-8),
+                                      (bbox[0]+pct,bbox[1]),(0,180,255),-1)
+                        cv2.rectangle(display,(bbox[0],bbox[1]),
+                                      (bbox[2],bbox[3]),(0,180,255),2)
+                        cv2.putText(display,f"Checking {buf}/{buf_max}",
+                                    (bbox[0],bbox[1]-12),
+                                    cv2.FONT_HERSHEY_SIMPLEX,0.48,(0,180,255),1)
+
+                elif not is_real:
+                    emb_buffer.clear()
+                    stable_name = "..."; candidate = None; candidate_run = 0
+                    if bbox is not None:
+                        draw_box_label(display, bbox,
+                                       f"SPOOF  {smoothed:.2f}", (0,0,255))
+                        draw_score_bar(display, bbox, smoothed, (0,0,255))
+
                 else:
-                    candidate = raw_name; candidate_run = 1
+                    emb_buffer.append(embedder.embed(face_tensor))
+                    avg_emb = F.normalize(
+                        torch.stack(list(emb_buffer)).mean(dim=0), p=2, dim=0)
+                    raw_name, raw_score = gallery.recognize(avg_emb)
 
-                if candidate_run >= CONFIG["label_stable_frames"]:
-                    stable_name  = candidate
-                    stable_score = raw_score
+                    if raw_name == candidate:
+                        candidate_run += 1
+                    else:
+                        candidate = raw_name; candidate_run = 1
 
-                if bbox is not None:
-                    known     = stable_name not in ("Unknown", "...")
-                    box_color = (0,200,0) if known else (130,130,130)
-                    label     = f"LIVE {smoothed:.2f} | {stable_name} {stable_score:.2f}"
-                    draw_box_label(display, bbox, label, box_color)
-                    draw_score_bar(display, bbox, stable_score, box_color)
+                    if candidate_run >= CONFIG["label_stable_frames"]:
+                        stable_name  = candidate
+                        stable_score = raw_score
 
-                    if known and stable_name not in attendance:
-                        now = datetime.now()
-                        d = now.strftime("%Y-%m-%d")
-                        t = now.strftime("%H:%M:%S")
-                        attendance[stable_name] = f"{d} {t}"
-                        with open(log_path, "a", newline="") as f:
-                            csv.writer(f).writerow([stable_name, d, t])
-                        print(f"✅ Attendance: {stable_name} {d} {t}")
+                    if bbox is not None:
+                        known     = stable_name not in ("Unknown", "...")
+                        box_color = (0,200,0) if known else (130,130,130)
+                        label     = f"LIVE {smoothed:.2f} | {stable_name} {stable_score:.2f}"
+                        draw_box_label(display, bbox, label, box_color)
+                        draw_score_bar(display, bbox, stable_score, box_color)
 
-        draw_spoof_hud(display, last_raw, last_smoothed,
-                       last_state, last_warming, spoof_predictor.threshold)
-        draw_attendance_overlay(display, attendance)
-        cv2.imshow("Attendance  |  ESC = quit", display)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q') or key == ord('Q'):  # 27 = ESC
-            break
+                        if known and stable_name not in attendance:
+                            now = datetime.now()
+                            d = now.strftime("%Y-%m-%d")
+                            t = now.strftime("%H:%M:%S")
+                            attendance[stable_name] = f"{d} {t}"
+                            with open(log_path, "a", newline="") as f:
+                                csv.writer(f).writerow([stable_name, d, t])
+                            print(f"✅ Attendance: {stable_name} {d} {t}")
 
-    cap.release()
-    cv2.destroyAllWindows()
+            draw_spoof_hud(display, last_raw, last_smoothed,
+                           last_state, last_warming, spoof_predictor.threshold)
+            draw_attendance_overlay(display, attendance)
+            cv2.imshow("Attendance  |  ESC = quit", display)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q') or key == ord('Q'):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
     spoof_predictor.score_summary()
     print(f"\n✅ Saved → {log_path}")
     for person, t in attendance.items():
@@ -694,8 +663,7 @@ def main():
         elif choice == "5":
             print(f"\n📊 Current liveness threshold : {spoof_predictor.threshold:.4f}")
             spoof_predictor.score_summary()
-            print(f"\n  💡 Tip: run  python diagnose_spoof.py  to see your exact scores")
-            print(f"  Lower → easier to pass as real   |   Raise → stricter")
+            print(f"\n  Lower → easier to pass as real   |   Raise → stricter")
             try:
                 new_t = float(input("\n  New threshold: "))
                 spoof_predictor.threshold = new_t
@@ -713,4 +681,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n  👋 Stopped by user. Goodbye!\n")

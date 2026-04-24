@@ -45,7 +45,7 @@ vggface2_train/
 NUAA/
 NUAA/*
 my_spoof_data/
-
+webcam_data/
 
 # Output and logs
 logs/

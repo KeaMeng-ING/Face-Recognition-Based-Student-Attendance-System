@@ -37,14 +37,14 @@ CSV_PATH     = "./dataset/processed_dataset/data.csv"
 SAVE_DIR     = "./checkpoints"
 IMG_SIZE     = 224
 BATCH_SIZE   = 32
-NUM_EPOCHS   = 40
+NUM_EPOCHS   = 60
 LR           = 1e-4
 WEIGHT_DECAY = 1e-5
 SEED         = 42
 DEVICE       = "mps" if torch.backends.mps.is_available() else \
                "cuda" if torch.cuda.is_available() else "cpu"
 FOCAL_ALPHA  = 0.25
-FOCAL_GAMMA  = 2.0
+FOCAL_GAMMA  = 3.0
 
 # Hand-picked val subjects: choose subjects that have BOTH real+fake,
 # spread across the subject ID range for diversity.
@@ -143,13 +143,15 @@ class NUAADataset(Dataset):
     TRAIN_TRANSFORMS = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomPerspective(distortion_scale=0.2, p=0.4),
         transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3),
-        transforms.RandomGrayscale(p=0.05),
+        transforms.RandomGrayscale(p=0.1),
         transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
-        transforms.RandomRotation(degrees=10),
+        transforms.RandomRotation(degrees=15),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406],
                              [0.229, 0.224, 0.225]),
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.15), ratio=(0.3, 3.3)),
     ])
     VAL_TRANSFORMS = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -176,23 +178,27 @@ class NUAADataset(Dataset):
 
 def make_loaders(csv_path, val_subjects, batch_size, seed):
     df = pd.read_csv(csv_path)
-    # attack_type column added in updated nuaa_preprocess.py — keep it if present
     df = df[df["rgb_path"].apply(os.path.exists) &
             df["fft_path"].apply(os.path.exists)].reset_index(drop=True)
+    
+    # Calculate sample weights: give 10x more importance to non-NUAA (screen) attacks
+    # as they are currently being ignored by the model.
+    df["is_personal"] = df["rgb_path"].str.contains("my_spoof_data")
+    
     print(f"  Total valid samples: {len(df)}")
-
-    if "attack_type" in df.columns:
-        print("  Attack type breakdown:")
-        for attack, count in df["attack_type"].value_counts().items():
-            label = "real" if df[df["attack_type"] == attack]["label"].iloc[0] == 1 else "fake"
-            print(f"    {attack:<22}  {count:>5}  ({label})")
+    print(f"  Personal samples: {df['is_personal'].sum()}")
 
     train_df, val_df = cross_subject_split(df, val_subjects)
 
-    # Weighted sampler — balance real/fake in each train batch
-    labels = train_df["label"].values
-    class_counts = np.bincount(labels.astype(int))
-    weights = 1.0 / class_counts[labels.astype(int)]
+    # Weighted sampler — balance classes AND prioritize personal data
+    weights = []
+    for _, row in train_df.iterrows():
+        # Base weight by class frequency
+        base_w = 1.0 if row["label"] == 1 else 0.5 # prioritize real slightly to avoid spoof-paranoia
+        # Multiplier for personal data to force the model to learn it
+        personal_multiplier = 15.0 if "my_spoof_data" in row["rgb_path"] else 1.0
+        weights.append(base_w * personal_multiplier)
+    
     sampler = WeightedRandomSampler(weights, num_samples=len(weights),
                                     replacement=True)
 
@@ -233,9 +239,9 @@ class AntiSpoofNet(nn.Module):
         super().__init__()
         base = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
 
-        # Freeze early layers — only fine-tune last 5 blocks
+        # Freeze early layers — fine-tune from block 6 onwards
         for i, layer in enumerate(base.features):
-            if i < 10:  # Freeze only first 10 instead of 14
+            if i < 6:
                 for p in layer.parameters():
                     p.requires_grad = False
 
