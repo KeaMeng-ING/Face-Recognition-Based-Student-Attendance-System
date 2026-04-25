@@ -1,343 +1,288 @@
 """
-SIMPLIFIED Training Script with Debugging
-Lower learning rate and better stability
+Face recognition training (project-native, no LFW dependency).
+
+Trains MobileFaceNet embeddings with an ArcFace-style classification head
+on an ImageFolder dataset (default: dataset/vggface2_train).
+
+Output checkpoint is compatible with src/app.py:
+  checkpoints/best_model.pth  -> contains key "model_state_dict"
+
+Usage:
+  python src/train.py
+  python src/train.py --data-dir dataset/vggface2_train --epochs 30
 """
 
+import argparse
+import os
+import random
+from dataclasses import dataclass
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-import os
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import numpy as np
-import math
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, random_split, Subset
+from torchvision import datasets, transforms
 
 from mobilefacenet import MobileFaceNet
-from dataset import LFWSubset, transform
-from main import image_paths, labels, label_to_idx
 
 
-class ArcFaceLoss(nn.Module):
-    """Simplified ArcFace with extra stability"""
-    def __init__(self, embedding_size=512, num_classes=158, s=30.0, m=0.30):
-        super(ArcFaceLoss, self).__init__()
-        self.s = s  # Reduced from 64 to 30 for stability
-        self.m = m  # Reduced from 0.5 to 0.3 for easier training
-        self.num_classes = num_classes
-        
-        self.weight = nn.Parameter(torch.FloatTensor(num_classes, embedding_size))
+@dataclass
+class Config:
+    data_dir: str = "./dataset/vggface2_train"
+    save_path: str = "./checkpoints/best_model.pth"
+    embedding_size: int = 512
+    batch_size: int = 64
+    epochs: int = 30
+    lr: float = 1e-4
+    weight_decay: float = 1e-4
+    val_split: float = 0.2
+    num_workers: int = 2
+    arcface_s: float = 30.0
+    arcface_m: float = 0.30
+    max_images: int = 0
+    seed: int = 42
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+class ArcFaceHead(nn.Module):
+    """ArcFace classification head."""
+
+    def __init__(self, embedding_size: int, num_classes: int, s: float, m: float):
+        super().__init__()
+        self.s = s
+        self.m = m
+        self.weight = nn.Parameter(torch.empty(num_classes, embedding_size))
         nn.init.xavier_uniform_(self.weight)
-        
-        self.cos_m = math.cos(m)
-        self.sin_m = math.sin(m)
-        self.th = math.cos(math.pi - m)
-        self.mm = math.sin(math.pi - m) * m
-        
-    def forward(self, embeddings, labels):
-        # Normalize
-        embeddings = nn.functional.normalize(embeddings, p=2, dim=1)
-        weight = nn.functional.normalize(self.weight, p=2, dim=1)
-        
-        # Cosine similarity
-        cosine = nn.functional.linear(embeddings, weight)
-        
-        # Compute sine
-        sine = torch.sqrt(torch.clamp(1.0 - cosine ** 2, 1e-7, 1.0))
-        
-        # Add margin: cos(θ + m) = cos(θ)cos(m) - sin(θ)sin(m)
+
+        self.cos_m = np.cos(m)
+        self.sin_m = np.sin(m)
+        self.th = np.cos(np.pi - m)
+        self.mm = np.sin(np.pi - m) * m
+
+    def forward(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        emb = F.normalize(embeddings, p=2, dim=1)
+        w = F.normalize(self.weight, p=2, dim=1)
+        cosine = F.linear(emb, w).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        sine = torch.sqrt(torch.clamp(1.0 - cosine * cosine, min=1e-7))
         phi = cosine * self.cos_m - sine * self.sin_m
         phi = torch.where(cosine > self.th, phi, cosine - self.mm)
-        
-        # One-hot for target class
+
         one_hot = torch.zeros_like(cosine)
         one_hot.scatter_(1, labels.view(-1, 1), 1.0)
-        
-        # Apply margin only to target class
-        output = (one_hot * phi) + ((1.0 - one_hot) * cosine)
-        output = output * self.s
-        
-        return nn.functional.cross_entropy(output, labels)
+        logits = (one_hot * phi + (1.0 - one_hot) * cosine) * self.s
+        return logits
 
 
-def train_one_epoch(model, criterion, dataloader, optimizer, device, epoch):
+@torch.no_grad()
+def compute_acc(logits: torch.Tensor, labels: torch.Tensor) -> float:
+    pred = torch.argmax(logits, dim=1)
+    return (pred == labels).float().mean().item() * 100.0
+
+
+def make_dataloaders(cfg: Config, device: torch.device):
+    tf = transforms.Compose([
+        transforms.Resize((112, 112)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+        transforms.RandomRotation(10),
+        transforms.ToTensor(),
+        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+    ])
+
+    dataset = datasets.ImageFolder(cfg.data_dir, transform=tf)
+    if cfg.max_images > 0 and cfg.max_images < len(dataset):
+        idx = np.random.default_rng(cfg.seed).choice(len(dataset), cfg.max_images, replace=False)
+        dataset = Subset(dataset, sorted(idx.tolist()))
+
+    val_size = int(len(dataset) * cfg.val_split)
+    train_size = len(dataset) - val_size
+    train_ds, val_ds = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(cfg.seed),
+    )
+
+    pin = device.type == "cuda"
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=pin,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=pin,
+    )
+
+    class_count = len(dataset.dataset.classes) if isinstance(dataset, Subset) else len(dataset.classes)
+    class_to_idx = dataset.dataset.class_to_idx if isinstance(dataset, Subset) else dataset.class_to_idx
+
+    return train_loader, val_loader, class_count, class_to_idx, len(train_ds), len(val_ds)
+
+
+def train_one_epoch(model, head, loader, optimizer, device):
     model.train()
-    criterion.train()
-    
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
-    
-    for batch_idx, (images, labels_batch) in enumerate(pbar):
+    head.train()
+
+    total_loss = 0.0
+    total_acc = 0.0
+    total_samples = 0
+
+    for images, labels in loader:
         images = images.to(device)
-        labels_batch = labels_batch.to(device)
-        
-        # Forward
+        labels = labels.to(device)
+
         embeddings = model(images)
-        loss = criterion(embeddings, labels_batch)
-        
-        # Check for NaN
-        if torch.isnan(loss):
-            print(f"\n❌ NaN loss detected at batch {batch_idx}!")
-            print(f"   Embedding stats: min={embeddings.min():.4f}, max={embeddings.max():.4f}, mean={embeddings.mean():.4f}")
-            return None, None
-        
-        # Backward
+        logits = head(embeddings, labels)
+        loss = F.cross_entropy(logits, labels)
+
         optimizer.zero_grad()
         loss.backward()
-        
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-        torch.nn.utils.clip_grad_norm_(criterion.parameters(), max_norm=10.0)
-        
+        torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(head.parameters()), max_norm=5.0)
         optimizer.step()
-        
-        # Stats
-        running_loss += loss.item()
-        
-        # Accuracy
-        with torch.no_grad():
-            emb_norm = nn.functional.normalize(embeddings, p=2, dim=1)
-            w_norm = nn.functional.normalize(criterion.weight, p=2, dim=1)
-            cosine = nn.functional.linear(emb_norm, w_norm)
-            _, predicted = torch.max(cosine, 1)
-            total += labels_batch.size(0)
-            correct += (predicted == labels_batch).sum().item()
-        
-        pbar.set_postfix({
-            'loss': f'{loss.item():.3f}',
-            'acc': f'{100 * correct / total:.1f}%'
-        })
-    
-    return running_loss / len(dataloader), 100 * correct / total
+
+        bs = labels.size(0)
+        total_samples += bs
+        total_loss += loss.item() * bs
+        total_acc += compute_acc(logits.detach(), labels) * bs
+
+    return total_loss / max(total_samples, 1), total_acc / max(total_samples, 1)
 
 
-def validate(model, criterion, dataloader, device):
+@torch.no_grad()
+def validate(model, head, loader, device):
     model.eval()
-    criterion.eval()
-    
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for images, labels_batch in dataloader:
-            images = images.to(device)
-            labels_batch = labels_batch.to(device)
-            
-            embeddings = model(images)
-            loss = criterion(embeddings, labels_batch)
-            
-            running_loss += loss.item()
-            
-            emb_norm = nn.functional.normalize(embeddings, p=2, dim=1)
-            w_norm = nn.functional.normalize(criterion.weight, p=2, dim=1)
-            cosine = nn.functional.linear(emb_norm, w_norm)
-            _, predicted = torch.max(cosine, 1)
-            total += labels_batch.size(0)
-            correct += (predicted == labels_batch).sum().item()
-    
-    return running_loss / len(dataloader), 100 * correct / total
+    head.eval()
+
+    total_loss = 0.0
+    total_acc = 0.0
+    total_samples = 0
+
+    for images, labels in loader:
+        images = images.to(device)
+        labels = labels.to(device)
+
+        embeddings = model(images)
+        logits = head(embeddings, labels)
+        loss = F.cross_entropy(logits, labels)
+
+        bs = labels.size(0)
+        total_samples += bs
+        total_loss += loss.item() * bs
+        total_acc += compute_acc(logits, labels) * bs
+
+    return total_loss / max(total_samples, 1), total_acc / max(total_samples, 1)
 
 
-def main():
-    # SIMPLIFIED CONFIG
-    config = {
-        'batch_size': 32,
-        'num_epochs': 30,
-        'learning_rate': 0.01,  # REDUCED from 0.1
-        'embedding_size': 512,
-        'num_workers': 2,  # Reduced to avoid warnings
-        'arcface_s': 30.0,  # Reduced from 64.0
-        'arcface_m': 0.30,  # Reduced from 0.50
-    }
-    
-    print("=" * 60)
-    print("SIMPLIFIED MobileFaceNet Training")
-    print("Lower LR + Easier ArcFace settings for stability")
-    print("=" * 60)
-    
-    # Verify data first
-    print("\nData verification:")
-    print(f"  Total images: {len(image_paths)}")
-    print(f"  Total labels: {len(labels)}")
-    print(f"  Unique classes: {len(label_to_idx)}")
-    print(f"  Label range: [{min(labels)}, {max(labels)}]")
-    
-    if min(labels) != 0 or max(labels) != len(label_to_idx) - 1:
-        print("\n❌ ERROR: Labels not in correct range!")
-        print("   Run diagnose_data.py first to debug")
-        return
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\nDevice: {device}")
-    print(f"Config: {config}")
-    
-    # Dataset
-    dataset = LFWSubset(image_paths, labels, transform=transform)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    
-    train_dataset, val_dataset = random_split(
-        dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+def parse_args() -> Config:
+    parser = argparse.ArgumentParser(description="Train MobileFaceNet on project dataset")
+    parser.add_argument("--data-dir", default=Config.data_dir)
+    parser.add_argument("--save-path", default=Config.save_path)
+    parser.add_argument("--embedding-size", type=int, default=Config.embedding_size)
+    parser.add_argument("--batch-size", type=int, default=Config.batch_size)
+    parser.add_argument("--epochs", type=int, default=Config.epochs)
+    parser.add_argument("--lr", type=float, default=Config.lr)
+    parser.add_argument("--weight-decay", type=float, default=Config.weight_decay)
+    parser.add_argument("--val-split", type=float, default=Config.val_split)
+    parser.add_argument("--num-workers", type=int, default=Config.num_workers)
+    parser.add_argument("--arcface-s", type=float, default=Config.arcface_s)
+    parser.add_argument("--arcface-m", type=float, default=Config.arcface_m)
+    parser.add_argument("--max-images", type=int, default=Config.max_images)
+    parser.add_argument("--seed", type=int, default=Config.seed)
+    args = parser.parse_args()
+    return Config(**vars(args))
+
+
+def main() -> None:
+    cfg = parse_args()
+    set_seed(cfg.seed)
+
+    if not os.path.isdir(cfg.data_dir):
+        raise FileNotFoundError(f"Dataset not found: {cfg.data_dir}")
+
+    device = torch.device(
+        "mps" if torch.backends.mps.is_available() else
+        "cuda" if torch.cuda.is_available() else "cpu"
     )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        shuffle=True,
-        num_workers=config['num_workers'],
-        pin_memory=False
+
+    train_loader, val_loader, class_count, class_to_idx, train_n, val_n = make_dataloaders(cfg, device)
+
+    model = MobileFaceNet(embedding_size=cfg.embedding_size).to(device)
+    head = ArcFaceHead(
+        embedding_size=cfg.embedding_size,
+        num_classes=class_count,
+        s=cfg.arcface_s,
+        m=cfg.arcface_m,
+    ).to(device)
+
+    optimizer = torch.optim.Adam(
+        list(model.parameters()) + list(head.parameters()),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
     )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['batch_size'],
-        shuffle=False,
-        num_workers=config['num_workers'],
-        pin_memory=False
-    )
-    
-    print(f"\nTrain samples: {len(train_dataset)}")
-    print(f"Val samples: {len(val_dataset)}")
-    
-    # Model
-    model = MobileFaceNet(embedding_size=config['embedding_size'])
-    model = model.to(device)
-    
-    criterion = ArcFaceLoss(
-        embedding_size=config['embedding_size'],
-        num_classes=len(label_to_idx),
-        s=config['arcface_s'],
-        m=config['arcface_m']
-    )
-    criterion = criterion.to(device)
-    
-    print(f"\nModel params: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
-    print(f"ArcFace: s={config['arcface_s']}, m={config['arcface_m']}")
-    
-    # Optimizer with warmup
-    optimizer = optim.SGD(
-        list(model.parameters()) + list(criterion.parameters()),
-        lr=config['learning_rate'],
-        momentum=0.9,
-        weight_decay=5e-4
-    )
-    
-    # Scheduler
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[15, 25],
-        gamma=0.1
-    )
-    
-    # Training
-    os.makedirs('./checkpoints', exist_ok=True)
-    
-    best_val_acc = 0.0
-    patience = 0
-    max_patience = 10
-    
-    train_losses, train_accs = [], []
-    val_losses, val_accs = [], []
-    
-    print("\n" + "=" * 60)
-    print("Starting training...")
-    print("=" * 60)
-    
-    for epoch in range(1, config['num_epochs'] + 1):
-        print(f"\nEpoch {epoch}/{config['num_epochs']}")
-        print("-" * 60)
-        
-        # Train
-        train_loss, train_acc = train_one_epoch(
-            model, criterion, train_loader, optimizer, device, epoch
-        )
-        
-        if train_loss is None:
-            print("\n❌ Training failed due to NaN. Stopping.")
-            break
-        
-        # Validate
-        val_loss, val_acc = validate(model, criterion, val_loader, device)
-        
-        # LR
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs)
+
+    os.makedirs(os.path.dirname(cfg.save_path), exist_ok=True)
+
+    best_val_acc = -1.0
+    best_epoch = 0
+
+    print("=" * 72)
+    print("Face Recognition Training (no LFW)")
+    print("=" * 72)
+    print(f"Device        : {device}")
+    print(f"Dataset       : {cfg.data_dir}")
+    print(f"Classes       : {class_count}")
+    print(f"Train samples : {train_n}")
+    print(f"Val samples   : {val_n}")
+    print(f"Save path     : {cfg.save_path}")
+    print("-" * 72)
+    print(f"{'Epoch':>5} | {'Train Loss':>10} | {'Train Acc':>9} | {'Val Loss':>8} | {'Val Acc':>7}")
+    print("-" * 72)
+
+    for epoch in range(1, cfg.epochs + 1):
+        tr_loss, tr_acc = train_one_epoch(model, head, train_loader, optimizer, device)
+        va_loss, va_acc = validate(model, head, val_loader, device)
         scheduler.step()
-        lr = optimizer.param_groups[0]['lr']
-        
-        print(f"\nEpoch {epoch} Summary:")
-        print(f"  Train: Loss={train_loss:.4f}, Acc={train_acc:.2f}%")
-        print(f"  Val:   Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
-        print(f"  LR: {lr:.6f}")
-        
-        # Save history
-        train_losses.append(train_loss)
-        train_accs.append(train_acc)
-        val_losses.append(val_loss)
-        val_accs.append(val_acc)
-        
-        # Save best
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            patience = 0
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'criterion_state_dict': criterion.state_dict(),
-                'val_acc': val_acc,
-            }, './checkpoints/best_model.pth')
-            print(f"  ✓ New best: {val_acc:.2f}%")
-        else:
-            patience += 1
-            if patience >= max_patience:
-                print(f"\n⚠️  Early stopping (no improvement for {max_patience} epochs)")
-                break
-    
-    print("\n" + "=" * 60)
-    print(f"Training Complete!")
-    print(f"Best Val Acc: {best_val_acc:.2f}%")
-    print("=" * 60)
-    
-    # Plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-    
-    epochs = range(1, len(train_losses) + 1)
-    ax1.plot(epochs, train_losses, 'b-', label='Train')
-    ax1.plot(epochs, val_losses, 'r-', label='Val')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('Loss')
-    ax1.legend()
-    ax1.grid(True)
-    
-    ax2.plot(epochs, train_accs, 'b-', label='Train')
-    ax2.plot(epochs, val_accs, 'r-', label='Val')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Accuracy (%)')
-    ax2.set_title('Accuracy')
-    ax2.legend()
-    ax2.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig('./checkpoints/training_curves.png', dpi=150)
-    print("\n✓ Saved training curves")
-    
-    # Summary
-    print("\nFINAL SUMMARY:")
-    print(f"  Initial train acc: {train_accs[0]:.2f}%")
-    print(f"  Final train acc:   {train_accs[-1]:.2f}%")
-    print(f"  Best val acc:      {best_val_acc:.2f}%")
-    
-    if best_val_acc < 50:
-        print("\n⚠️  WARNING: Accuracy is still low (<50%)")
-        print("   Possible issues:")
-        print("   1. Data labels are incorrect (run diagnose_data.py)")
-        print("   2. Model architecture has bugs")
-        print("   3. Images are not properly preprocessed")
-        print("   4. LFW dataset structure is wrong")
+
+        mark = ""
+        if va_acc > best_val_acc:
+            best_val_acc = va_acc
+            best_epoch = epoch
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "head_state_dict": head.state_dict(),
+                    "best_val_acc": best_val_acc,
+                    "class_to_idx": class_to_idx,
+                    "embedding_size": cfg.embedding_size,
+                    "arcface_s": cfg.arcface_s,
+                    "arcface_m": cfg.arcface_m,
+                },
+                cfg.save_path,
+            )
+            mark = " <-- best"
+
+        print(
+            f"{epoch:5d} | {tr_loss:10.4f} | {tr_acc:9.2f} | {va_loss:8.4f} | {va_acc:7.2f}{mark}"
+        )
+
+    print("-" * 72)
+    print(f"Best validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}")
+    print(f"Checkpoint saved to: {cfg.save_path}")
 
 
 if __name__ == "__main__":

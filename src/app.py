@@ -37,7 +37,7 @@ CONFIG = {
     "recognition_threshold":  0.60,
 
     "spoof_model_path":          "./checkpoints/best_model_antispoofing.pth",
-    "spoof_buffer_size":          16,   
+    "spoof_buffer_size":          5,   
     "spoof_real_confirm_frames":   8,   
     "spoof_confirm_frames":        6,   
     "spoof_crop_margin":           0.30,

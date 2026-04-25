@@ -46,6 +46,7 @@ NUAA/
 NUAA/*
 my_spoof_data/
 webcam_data/
+anti_spoofing/
 
 # Output and logs
 logs/
