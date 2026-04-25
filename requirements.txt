@@ -4,13 +4,4 @@ facenet-pytorch>=2.5.3
 opencv-python>=4.8.0
 numpy>=1.23.0
 Pillow>=9.0.0
-streamlit
-streamlit-webrtc
-torch
-torchvision
-facenet-pytorch
-opencv-python
-numpy
-Pillow
-av
-pandas
+matplotlib>=3.7.0
