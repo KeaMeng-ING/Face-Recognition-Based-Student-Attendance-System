@@ -1,18 +1,3 @@
-"""
-finetune_webcam.py
-==================
-Fine-tunes the existing AntiSpoofNet checkpoint on your webcam data.
-Keeps NUAA data in the mix so the model doesn't forget printed-photo attacks.
-
-Requirements:
-  - Collect webcam data first:
-      python collect_webcam_data.py --label real --n 300
-      python collect_webcam_data.py --label fake --n 300
-  - Existing checkpoint at ./checkpoints/best_model_antispoofing.pth
-
-Usage:
-    python finetune_webcam.py
-"""
 
 import os
 import glob

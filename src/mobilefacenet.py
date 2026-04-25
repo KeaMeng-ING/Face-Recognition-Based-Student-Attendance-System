@@ -1,9 +1,3 @@
-"""
-MobileFaceNet Implementation in PyTorch
-Based on: https://arxiv.org/abs/1804.07573
-Optimized for face recognition with ArcFace loss
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

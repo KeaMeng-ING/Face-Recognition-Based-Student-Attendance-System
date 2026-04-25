@@ -1,9 +1,3 @@
-"""
-Anti-Spoofing Evaluation — Precision, Recall, F1, Confusion Matrix
-Uses the same AntiSpoofNet architecture and val split as train_antispoofing.py
-Run: python src/eval_antispoofing.py
-"""
-
 import os, re, numpy as np, pandas as pd
 from pathlib import Path
 

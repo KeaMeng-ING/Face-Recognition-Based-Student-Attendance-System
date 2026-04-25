@@ -1,35 +1,3 @@
-"""
-Multi-Person Data Collector for Anti-Spoofing Fine-Tuning
-==========================================================
-Collects REAL and FAKE samples from multiple people.
-
-Folder structure saved:
-    my_spoof_data/
-        real/
-            person_alice/
-                normal_00001.jpg
-                bright_light_00002.jpg
-                ...
-            person_bob/
-                ...
-        fake/
-            shared/           ← spoof attacks (not person-specific)
-                phone_screen_00001.jpg
-                ...
-
-Why separate by person?
-  Spoof detection is about TEXTURE not identity.
-  Having multiple people = more lighting/skin/expression variety
-  = model generalises better, not just to you.
-
-Controls during recording:
-    A      toggle auto-capture (~12 fps)
-    SPACE  capture single frame
-    Q      done with this scenario
-
-Usage:
-    python collect_data.py
-"""
 
 import cv2
 import os

@@ -1,19 +1,3 @@
-"""
-Anti-Spoofing — NUAA Correct Split Strategy
-============================================
-ROOT CAUSE: NUAA has same 14/16 subjects in both real & fake sets.
-Subject-aware split still leaks: if subject 0001 is in val-fake,
-the model saw their real face in train → recognizes identity, not liveness.
-
-SOLUTION: Split so that for SHARED subjects, both their real AND fake
-images go to the same partition. This way the model cannot use
-identity as a shortcut — it must learn texture/frequency cues.
-
-Partition strategy:
-  - 80% of subjects → train  (both their real + fake images)
-  - 20% of subjects → val    (both their real + fake images)
-  - Subject 0013 (real only) and 0016 (fake only) assigned carefully
-"""
 
 import os
 import re

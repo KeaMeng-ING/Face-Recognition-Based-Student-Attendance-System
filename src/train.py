@@ -1,17 +1,3 @@
-"""
-Face recognition training (project-native, no LFW dependency).
-
-Trains MobileFaceNet embeddings with an ArcFace-style classification head
-on an ImageFolder dataset (default: dataset/vggface2_train).
-
-Output checkpoint is compatible with src/app.py:
-  checkpoints/best_model.pth  -> contains key "model_state_dict"
-
-Usage:
-  python src/train.py
-  python src/train.py --data-dir dataset/vggface2_train --epochs 30
-"""
-
 import argparse
 import os
 import random

@@ -1,17 +1,3 @@
-"""
-Face recognition evaluation (project-native, no LFW dependency).
-
-Evaluates a MobileFaceNet embedding checkpoint using gallery-vs-probe matching
-with cosine similarity on ImageFolder identities (default: dataset/vggface2_train).
-
-Outputs:
-  - stdout summary
-  - checkpoints/face_recognition_evaluation_report.txt
-
-Usage:
-  python src/eval_face_recognition.py
-  python src/eval_face_recognition.py --max-identities 120 --gallery-per-id 3 --probe-per-id 5
-"""
 
 import argparse
 import os

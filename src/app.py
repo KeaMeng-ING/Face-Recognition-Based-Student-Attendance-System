@@ -1,12 +1,3 @@
-"""
-Face Recognition Attendance System — with Anti-Spoofing
-=========================================================
-FIXES APPLIED:
-  1. SPOOF_TRANSFORM now resizes to 224x224 (was 80x80) — MobileNetV2 fix
-  2. CLAHE removed from _prepare_spoof_crop (training had no CLAHE)
-  3. Buffer sizes reduced: 24→12, confirm frames 8→4
-  4. FFT computed from 80x80 grayscale (unchanged, was already correct)
-"""
 
 import csv
 import cv2

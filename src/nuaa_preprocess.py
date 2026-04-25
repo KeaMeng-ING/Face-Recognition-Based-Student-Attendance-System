@@ -1,24 +1,3 @@
-"""
-NUAA Dataset Preprocessor for Face Anti-Spoofing
-=================================================
-Processes multiple attack types into a single combined dataset:
-
-  Source 1 — NUAA (printed photo attacks):
-    NUAA/ClientRaw/      <- real faces
-    NUAA/ImposterRaw/    <- printed photo spoofs
-
-  Source 2 — Personal fake data (screen / video attacks):
-    my_spoof_data/fake/  <- phone screen, phone video, etc.
-
-Output:
-    processed_dataset/
-        real/        <- cropped real face images
-        fake/        <- cropped fake face images (all attack types)
-        real_fft/    <- FFT maps for real faces
-        fake_fft/    <- FFT maps for fake faces
-        data.csv     <- rgb_path, fft_path, label, attack_type
-"""
-
 import os
 import cv2
 import csv

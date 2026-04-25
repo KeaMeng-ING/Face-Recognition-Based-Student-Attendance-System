@@ -1,23 +1,3 @@
-"""
-Dataset Explorer
-================
-Prints statistics and saves visualisation plots for all three datasets
-used in this project:
-
-  1. VGGFace2      — face identity / recognition dataset
-  2. NUAA          — anti-spoofing dataset (raw + processed)
-  3. Personal data — your own collected real/spoof samples
-
-Usage:
-    python src/understand_dataset.py
-
-Outputs (saved to ./checkpoints/dataset_analysis/):
-    vggface2_samples.png         — sample faces from VGGFace2
-    nuaa_samples.png             — side-by-side real vs fake from NUAA
-    personal_samples.png         — your own real vs fake samples
-    class_distribution.png      — bar chart of all dataset sizes
-"""
-
 import os
 import cv2
 import numpy as np
