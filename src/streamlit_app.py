@@ -528,14 +528,26 @@ def main():
     # ── Main area ──────────────────────────────────────────────
     col_vid, col_info = st.columns([3, 1])
 
+    # TURN servers are required for WebRTC to work reliably on cloud deployments.
+    # Set TURN_URL, TURN_USERNAME, TURN_CREDENTIAL in Streamlit Cloud secrets to enable.
+    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    turn_url = os.environ.get("TURN_URL")
+    if turn_url:
+        ice_servers.append({
+            "urls": [turn_url],
+            "username": os.environ.get("TURN_USERNAME", ""),
+            "credential": os.environ.get("TURN_CREDENTIAL", ""),
+        })
+
     with col_vid:
         ctx = webrtc_streamer(
             key="attendance",
             mode=WebRtcMode.SENDRECV,
+            rtc_configuration={"iceServers": ice_servers},
             video_processor_factory=AttendanceProcessor,
             media_stream_constraints={
-                "video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}},
-                "audio": False
+                "video": {"width": {"exact": 1920}, "height": {"exact": 1080}},
+                "audio": False,
             },
             async_processing=True,
         )

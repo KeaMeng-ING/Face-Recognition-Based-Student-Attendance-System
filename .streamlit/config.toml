@@ -1,0 +1,6 @@
+[server]
+maxUploadSize = 50
+enableWebsocketCompression = false
+
+[browser]
+serverAddress = "localhost"
