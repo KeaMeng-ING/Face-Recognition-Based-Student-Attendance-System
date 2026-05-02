@@ -30,8 +30,6 @@ build/
 *.ipynb
 
 # ML/Data files (large files)
-*.pth
-*.pt
 *.pkl
 *.hdf5
 *.h5
