@@ -533,7 +533,10 @@ def main():
             key="attendance",
             mode=WebRtcMode.SENDRECV,
             video_processor_factory=AttendanceProcessor,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={
+                "video": {"width": {"ideal": 1920}, "height": {"ideal": 1080}},
+                "audio": False
+            },
             async_processing=True,
         )
 
