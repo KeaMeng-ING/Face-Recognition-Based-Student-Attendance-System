@@ -449,6 +449,55 @@ class AttendanceProcessor(VideoProcessorBase):
         draw_attendance_panel(disp, self._attendance)
 
 
+# ── ICE / TURN helpers ─────────────────────────────────────────────────────────
+
+def _secret(key: str, default: str = "") -> str:
+    """Read from st.secrets first, fall back to os.environ."""
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, default)
+
+
+def _get_ice_servers():
+    """
+    Returns (ice_server_list, source_label) for WebRTC.
+    Priority:
+      1. Metered.ca TURN  — set METERED_API_KEY + METERED_APP_NAME in Streamlit secrets
+      2. Manual TURN      — set TURN_URL / TURN_USERNAME / TURN_CREDENTIAL
+      3. Multiple STUN    — fallback (unreliable behind strict NAT)
+    """
+    import urllib.request, json as _json
+
+    stun_servers = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+    ]
+
+    metered_key = _secret("METERED_API_KEY")
+    app_name    = _secret("METERED_APP_NAME")
+    if metered_key and app_name:
+        url = f"https://{app_name}.metered.live/api/v1/turn/credentials?apiKey={metered_key}"
+        try:
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                servers = _json.loads(resp.read())
+            if servers:
+                return servers, "Metered TURN"
+        except Exception as exc:
+            return stun_servers, f"Metered fetch failed: {exc}"
+
+    turn_url = _secret("TURN_URL")
+    if turn_url:
+        return stun_servers + [{
+            "urls": [turn_url],
+            "username":   _secret("TURN_USERNAME"),
+            "credential": _secret("TURN_CREDENTIAL"),
+        }], "Manual TURN"
+
+    return stun_servers, "STUN only (no TURN configured)"
+
+
 # ── Streamlit UI ───────────────────────────────────────────────────────────────
 
 def main():
@@ -518,6 +567,12 @@ def main():
                 st.info("Gallery is empty.")
 
         st.divider()
+        if "TURN" in ice_label:
+            st.success(f"Network: {ice_label}")
+        else:
+            st.warning(f"Network: {ice_label}")
+
+        st.divider()
         st.subheader("Thresholds")
         _, _, _, _, _, default_spoof_thr = load_models()
         rec_thr   = st.slider("Recognition", 0.50, 1.00,
@@ -528,16 +583,7 @@ def main():
     # ── Main area ──────────────────────────────────────────────
     col_vid, col_info = st.columns([3, 1])
 
-    # TURN servers are required for WebRTC to work reliably on cloud deployments.
-    # Set TURN_URL, TURN_USERNAME, TURN_CREDENTIAL in Streamlit Cloud secrets to enable.
-    ice_servers = [{"urls": ["stun:stun.l.google.com:19302"]}]
-    turn_url = os.environ.get("TURN_URL")
-    if turn_url:
-        ice_servers.append({
-            "urls": [turn_url],
-            "username": os.environ.get("TURN_USERNAME", ""),
-            "credential": os.environ.get("TURN_CREDENTIAL", ""),
-        })
+    ice_servers, ice_label = _get_ice_servers()
 
     with col_vid:
         ctx = webrtc_streamer(
