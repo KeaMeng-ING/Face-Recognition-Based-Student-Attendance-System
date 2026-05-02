@@ -520,6 +520,7 @@ def main():
         load_models()
 
     gallery = get_gallery()
+    ice_servers, ice_label = _get_ice_servers()
 
     # ── Sidebar ────────────────────────────────────────────────
     with st.sidebar:
@@ -582,8 +583,6 @@ def main():
 
     # ── Main area ──────────────────────────────────────────────
     col_vid, col_info = st.columns([3, 1])
-
-    ice_servers, ice_label = _get_ice_servers()
 
     with col_vid:
         ctx = webrtc_streamer(
