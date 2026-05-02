@@ -591,7 +591,7 @@ def main():
             rtc_configuration={"iceServers": ice_servers},
             video_processor_factory=AttendanceProcessor,
             media_stream_constraints={
-                "video": {"width": {"exact": 1920}, "height": {"exact": 1080}},
+                "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
                 "audio": False,
             },
             async_processing=True,
@@ -648,7 +648,7 @@ def main():
             if att:
                 ph_att.dataframe(
                     pd.DataFrame(list(att.items()), columns=["Name", "Time"]),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
             else:
                 ph_att.info("Waiting for recognition...")
@@ -658,7 +658,7 @@ def main():
     with st.expander("Full Attendance Log", expanded=False):
         if os.path.exists(LOG_PATH):
             df = pd.read_csv(LOG_PATH)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(df, width="stretch", hide_index=True)
             csv_bytes = df.to_csv(index=False).encode()
             st.download_button("Download CSV", csv_bytes, "attendance_log.csv", "text/csv")
         else:
